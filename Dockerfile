@@ -4,7 +4,11 @@
 FROM node:24-bookworm-slim AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund
+# --include=dev because the build needs the tooling (Tailwind, PostCSS,
+# TypeScript). A NODE_ENV=production in the environment, which some platforms
+# pass as a build argument, would otherwise skip it and `next build` fails on
+# a missing @tailwindcss/postcss.
+RUN npm ci --include=dev --no-audit --no-fund
 
 FROM node:24-bookworm-slim AS builder
 WORKDIR /app
