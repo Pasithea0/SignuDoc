@@ -281,7 +281,7 @@ export function OrganizationSettings({
                 error={errors.senderAddress}
                 helper={
                   values.senderAddressFromEnv
-                    ? "Set by the RESEND_FROM_EMAIL environment variable."
+                    ? "Set by the RESEND_FROM_EMAIL or SMTP_FROM_EMAIL environment variable."
                     : "The address emails come from, at a domain you own. A subdomain such as notifications@sign.yourcompany.com keeps this site's mail apart from your everyday email."
                 }
                 label="Send email from"
