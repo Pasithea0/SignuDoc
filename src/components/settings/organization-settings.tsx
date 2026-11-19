@@ -642,6 +642,15 @@ function describeEmailStatus(status: EmailStatus): {
         ready: true,
         title: "Emails are being captured, not sent",
       };
+    case "smtp":
+      return {
+        lines: [
+          `Emails are sent from ${status.senderAddress} through this site's own mail server.`,
+          "Whether that server accepts this sender is up to it: send yourself a test email to find out.",
+        ],
+        ready: true,
+        title: "Email is working",
+      };
     case "missing_key":
       return status.onVercel
         ? {

@@ -1,0 +1,19 @@
+# The build context stays small: node_modules and build output come from
+# inside the image, and local data and secrets never leave the machine.
+node_modules
+.next
+.data
+.git
+.github
+.hermes
+.env
+.env.*
+!.env.example
+*.log
+coverage
+test-results
+playwright-report
+Dockerfile
+.dockerignore
+docker-compose.yml
+README.md

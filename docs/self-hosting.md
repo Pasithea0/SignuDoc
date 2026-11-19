@@ -327,7 +327,19 @@ It is opt-in for now because it has not yet been proven against a live Vercel de
 
 ## Self-hosting somewhere else
 
-SignuDoc is a regular Next.js app and runs anywhere Node.js 24 and Postgres do:
+SignuDoc is a regular Next.js app and runs anywhere Node.js 24 and Postgres do. This repository has a `Dockerfile` and a `.dockerignore` for it, so a platform that builds a Dockerfile (Coolify, Dokploy, a plain `docker build`) needs no build settings of its own:
+
+```bash
+docker build -t signudoc .
+docker run -d -p 3000:3000 \
+  -e DATABASE_URL=postgres://… \
+  -e APP_URL=https://sign.example.com \
+  -e BETTER_AUTH_SECRET="$(openssl rand -hex 32)" \
+  -v signudoc-data:/data/storage \
+  signudoc
+```
+
+The container applies migrations from `db/migrations` on start, before it serves anything. Without Docker, the same steps are:
 
 ```bash
 npm run db:migrate
@@ -340,8 +352,8 @@ Away from Vercel, a few things Vercel does for you are yours to set:
 - `DATABASE_URL`, pointing at your Postgres. Run `npm run db:migrate` on every deploy; it only applies what is new.
 - `APP_URL`, the site's public HTTPS address.
 - `BETTER_AUTH_SECRET`, at least 32 characters (`openssl rand -hex 32`). Without it a secret is derived from the database password, which must then be at least 12 characters long.
-- `RESEND_API_KEY`, from your Resend account.
-- Files are kept on the machine's disk under `.data/storage` (`STORAGE_LOCAL_DIR` changes where), so that disk must survive restarts. To use a Vercel Blob store from elsewhere, set `BLOB_READ_WRITE_TOKEN`.
+- `RESEND_API_KEY`, from your Resend account, or a mail server of your own over SMTP: `EMAIL_DRIVER=smtp`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM_EMAIL` for the address your provider must accept. Through SMTP there is no domain to verify in the app; Settings shows the sender in use, and a test email is what proves the server accepts it.
+- Files are kept on the machine's disk under `.data/storage` (`STORAGE_LOCAL_DIR` changes where), so that disk must survive restarts: mount a volume on it, as in the `docker run` above (`/data/storage`). To use a Vercel Blob store from elsewhere, set `BLOB_READ_WRITE_TOKEN`.
 - Leave `EMAIL_DRIVER` unset. The capture driver is for development only.
 
 Self-hosted operators are responsible for:

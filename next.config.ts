@@ -31,6 +31,10 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
+  // The Dockerfile in this repository copies a self-contained server out of
+  // .next/standalone, so the image carries only what the app needs at run
+  // time. Vercel builds are unaffected.
+  output: "standalone",
   // Finished PDFs are drawn with fonts read from disk at runtime, cut down
   // by a WebAssembly subsetter (src/lib/services/pdf-fonts.ts). Listing the
   // files here makes sure they are copied into the deployed functions.

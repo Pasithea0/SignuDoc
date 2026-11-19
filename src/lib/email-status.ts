@@ -6,7 +6,7 @@ import {
   getAddressDomain,
   isResendTestSender,
 } from "./services/email-addresses.ts";
-import { resolveEmailDriver } from "./services/email.ts";
+import { resolveEmailDriver, resolveEmailAddresses } from "./services/email.ts";
 import {
   getSettings,
   markEmailReady,
@@ -38,6 +38,12 @@ export type EmailDnsRecord = {
 export type EmailStatus =
   /** Development: messages are written to disk, not sent. */
   | { state: "capture" }
+  /**
+   * Mail goes out through this install's own SMTP server, which has no
+   * domains to verify from here: what it accepts from is decided by the
+   * server, and a test email is the way to find out whether it does.
+   */
+  | { state: "smtp"; domain: string; senderAddress: string }
   /**
    * No Resend API key, so nothing can be sent. On Vercel the steps to fix it
    * are Vercel's, which the page spells out.
@@ -389,6 +395,31 @@ async function inspectEmail({
     };
   }
 
+  // An SMTP server has no account to ask about a domain: whether it will
+  // send from an address is a question for the next message, so the status
+  // says what will be used and leaves the test email to prove it.
+  if (!domainsClient && resolveEmailDriver(env) === "smtp") {
+    const resolvedSettings = settings ?? (await getSettings(env));
+    const markReady =
+      recordReady ??
+      ((ready: boolean) => defaultRecordReady(ready, resolvedSettings));
+    const { senderAddress } = await resolveEmailAddresses(env);
+    const address = extractEmailAddress(senderAddress);
+
+    await markReady(true);
+
+    return {
+      client: null,
+      domainId: null,
+      markReady,
+      status: {
+        domain: getAddressDomain(address) ?? "",
+        senderAddress: address,
+        state: "smtp",
+      },
+    };
+  }
+
   const client = domainsClient ?? createDomainsClient(env);
 
   if (!client) {
@@ -557,7 +588,11 @@ export function emailNeedsAttention(
   env: EnvSource = process.env,
 ): boolean {
   try {
-    if (resolveEmailDriver(env) === "capture") {
+    const driver = resolveEmailDriver(env);
+
+    // Capture drops mail on purpose and SMTP sends it: neither has a domain
+    // left to verify, so neither needs the administrator's attention.
+    if (driver === "capture" || driver === "smtp") {
       return false;
     }
   } catch {

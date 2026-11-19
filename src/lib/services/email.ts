@@ -2,11 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import nodemailer, { type Transporter } from "nodemailer";
 import { Resend } from "resend";
 
 import { getSettings } from "../settings.ts";
 import { type EmailTemplateKind } from "../types/domain.ts";
-import { getEnv, isLocalDeployment, type EnvSource } from "../utils/env.ts";
+import {
+  getEnv,
+  isLocalDeployment,
+  readEnv,
+  type EnvSource,
+} from "../utils/env.ts";
 import { buildEmailAddresses, type EmailAddresses } from "./email-addresses.ts";
 import {
   assertServiceConfig,
@@ -14,14 +20,19 @@ import {
 } from "./service-config.ts";
 
 // The addresses mail is sent from and replied to are not needed here: they
-// come from RESEND_FROM_EMAIL and SUPPORT_EMAIL when those are set, and from
-// the install's settings otherwise, and are looked up when a message is sent.
-const EMAIL_ENV_KEYS = ["RESEND_API_KEY"] as const;
+// come from RESEND_FROM_EMAIL (SMTP_FROM_EMAIL, for a mail server of your own)
+// and SUPPORT_EMAIL when those are set, and from the install's settings
+// otherwise, and are looked up when a message is sent.
+const RESEND_ENV_KEYS = ["RESEND_API_KEY"] as const;
+
+// A mail server of your own needs the host to talk to and the port. The login
+// is optional only for a server that accepts mail without one.
+const SMTP_ENV_KEYS = ["SMTP_HOST", "SMTP_PORT"] as const;
 
 const DEFAULT_CAPTURE_DIR = ".data/outbox";
 const DEFAULT_CAPTURE_SENDER_ADDRESS = "dev@signudoc.localhost";
 
-export type EmailDriver = "capture" | "resend";
+export type EmailDriver = "capture" | "resend" | "smtp";
 
 export type EmailAttachment = {
   content: Uint8Array;
@@ -73,6 +84,8 @@ type CreateEmailServiceOptions = {
   resendClient?: Resend;
   /** Replaced in tests, so that they do not really wait. */
   wait?: (milliseconds: number) => Promise<void>;
+  /** Replaced in tests, which do not talk to a mail server. */
+  smtpTransport?: Pick<Transporter, "sendMail">;
 };
 
 /** How often a message Resend turned away for rate is tried again. */
@@ -174,6 +187,31 @@ function buildResendPayload(
   };
 }
 
+/** The same message, as a mail server of your own takes it. */
+function buildSmtpPayload(
+  message: TransactionalEmailMessage,
+  config: EmailAddresses,
+) {
+  return {
+    ...(message.attachments?.length
+      ? {
+          attachments: message.attachments.map((attachment) => ({
+            content: Buffer.from(attachment.content),
+            contentType: attachment.contentType,
+            filename: attachment.filename,
+          })),
+        }
+      : {}),
+    from: config.senderAddress,
+    headers: { "X-SignuDoc-Template": message.template },
+    html: message.htmlBody,
+    replyTo: message.replyTo ?? config.supportAddress ?? undefined,
+    subject: message.subject,
+    text: message.textBody,
+    to: message.to,
+  };
+}
+
 export interface EmailService {
   send(
     message: TransactionalEmailMessage,
@@ -192,12 +230,16 @@ export function resolveEmailDriver(env: EnvSource = process.env): EmailDriver {
     return "resend";
   }
 
-  if (configuredDriver === "capture" || configuredDriver === "resend") {
+  if (
+    configuredDriver === "capture" ||
+    configuredDriver === "resend" ||
+    configuredDriver === "smtp"
+  ) {
     return configuredDriver;
   }
 
   throw new Error(
-    `Unknown EMAIL_DRIVER "${configuredDriver}". Use "resend" or "capture".`,
+    `Unknown EMAIL_DRIVER "${configuredDriver}". Use "resend", "smtp" or "capture".`,
   );
 }
 
@@ -288,14 +330,92 @@ function createCaptureEmailService(
   };
 }
 
+/**
+ * A mail server of your own, over SMTP: the way to run SignuDoc off Vercel
+ * and still send real email. The login is optional only for a server that
+ * accepts mail without one; a host that refuses it says so, and the message
+ * comes back to the person who tried to send.
+ */
+function createSmtpEmailService({
+  resolveAddresses,
+  transport,
+}: {
+  resolveAddresses: () => Promise<EmailAddresses>;
+  transport: Pick<Transporter, "sendMail">;
+}): EmailService {
+  async function send(
+    message: TransactionalEmailMessage,
+  ): Promise<EmailDeliveryResult> {
+    const config = await resolveAddresses();
+    const info = await transport.sendMail(
+      buildSmtpPayload(message, config),
+    );
+
+    const accepted = (info.accepted ?? []).map(String);
+    const rejected = (info.rejected ?? []).map(String);
+
+    return {
+      accepted: accepted.length > 0 ? accepted : [message.to],
+      messageId: typeof info.messageId === "string" ? info.messageId : undefined,
+      rejected,
+    };
+  }
+
+  return {
+    send,
+    async sendBatch(messages) {
+      const results: EmailDeliveryResult[] = [];
+
+      // SMTP has no batch of its own: one message is one transaction.
+      for (const message of messages) {
+        results.push(await send(message));
+      }
+
+      return results;
+    },
+  };
+}
+
+function createSmtpTransport(env: EnvSource): Transporter {
+  const host = readEnv(env, "SMTP_HOST");
+  const port = Number(readEnv(env, "SMTP_PORT"));
+  const user = readEnv(env, "SMTP_USER");
+  const pass = readEnv(env, "SMTP_PASS");
+
+  return nodemailer.createTransport({
+    auth: user && pass ? { pass, user } : undefined,
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    host,
+    // 465 is TLS from the first byte; every other port starts in the clear
+    // and upgrades, which is what every provider this is used with expects.
+    port,
+    requireTLS: port !== 465,
+    secure: port === 465,
+    socketTimeout: 30_000,
+    tls: { minVersion: "TLSv1.2" },
+  });
+}
+
 /** The addresses this install sends from, as configured right now. */
 export async function resolveEmailAddresses(
   env: EnvSource = process.env,
 ): Promise<EmailAddresses> {
   const settings = await getSettings(env);
+  const driver = resolveEmailDriver(env);
 
-  return resolveEmailDriver(env) === "capture"
-    ? buildEmailAddresses(settings, DEFAULT_CAPTURE_SENDER_ADDRESS)
+  if (driver === "capture") {
+    return buildEmailAddresses(settings, DEFAULT_CAPTURE_SENDER_ADDRESS);
+  }
+
+  // SMTP_FROM_EMAIL pins the sender for a mail server outside Vercel, where
+  // there is no Resend account to verify a domain with. It wins over the
+  // address stored in Settings, which is what a self-hosted install without
+  // it falls back to.
+  const smtpFrom = driver === "smtp" ? readEnv(env, "SMTP_FROM_EMAIL") : undefined;
+
+  return smtpFrom
+    ? buildEmailAddresses({ ...settings, senderAddress: smtpFrom })
     : buildEmailAddresses(settings);
 }
 
@@ -338,14 +458,26 @@ export function createEmailService({
   env = process.env,
   resolveAddresses = () => resolveEmailAddresses(env),
   resendClient,
+  smtpTransport,
   wait = waitFor,
 }: CreateEmailServiceOptions = {}): EmailService {
-  if (!resendClient && resolveEmailDriver(env) === "capture") {
+  const driver = resendClient ? "resend" : resolveEmailDriver(env);
+
+  if (driver === "capture" && !resendClient) {
     return createCaptureEmailService(env, resolveAddresses);
   }
 
+  if (driver === "smtp" && !resendClient) {
+    assertServiceConfig("email", SMTP_ENV_KEYS, env);
+
+    return createSmtpEmailService({
+      resolveAddresses,
+      transport: smtpTransport ?? createSmtpTransport(env),
+    });
+  }
+
   if (!resendClient) {
-    assertServiceConfig("email", EMAIL_ENV_KEYS, env);
+    assertServiceConfig("email", RESEND_ENV_KEYS, env);
   }
 
   const client = resendClient ?? new Resend(getEnv(env).email.apiKey!);
